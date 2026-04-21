@@ -11,12 +11,6 @@ import requests
 import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 
-API_KEYS = [
-    "0313c587-19db-4382-b54b-4e25d6e5a03f",
-    "e11794ea-b134-43a5-97d0-3712ba0bc023",
-    "135fec19-ae16-4594-85bf-1e02ba55c317",
-]
-
 BASE_URL = "https://api.company-information.service.gov.uk"
 
 TARGET_POSTCODE_PREFIXES = {
@@ -57,7 +51,7 @@ TARGET_COUNTRIES = {
 SEEN_FILE = "seen_companies.json"
 OFFICER_CACHE_FILE = "officer_appointments_cache.json"
 RESULTS_FILE = "companies_house_results.csv"
-AUTO_REFRESH_MS = 5000
+AUTO_REFRESH_MS = 120000
 
 SIC_GROUP_MAP = {}
 for code in TECH_SIC_CODES:
@@ -66,6 +60,21 @@ for code in PROPERTY_SIC_CODES:
     SIC_GROUP_MAP[code] = "Property"
 for code in HOLDINGS_SIC_CODES:
     SIC_GROUP_MAP[code] = "Holdings"
+
+
+def get_api_keys() -> List[str]:
+    if "COMPANIES_HOUSE_API_KEYS" in st.secrets:
+        raw = st.secrets["COMPANIES_HOUSE_API_KEYS"]
+        if isinstance(raw, str):
+            return [x.strip() for x in raw.split(",") if x.strip()]
+        if isinstance(raw, list):
+            return [str(x).strip() for x in raw if str(x).strip()]
+
+    env_value = os.getenv("COMPANIES_HOUSE_API_KEYS", "")
+    if env_value:
+        return [x.strip() for x in env_value.split(",") if x.strip()]
+
+    return []
 
 
 class RotatingCHClient:
@@ -241,7 +250,6 @@ def make_assumed_email(first_director_name: str, company_name: str) -> str:
         return ""
 
     first_name = first_director_name.strip().split()[0].lower()
-
     company_clean = company_name.lower()
     company_clean = re.sub(r"\blimited\b|\bltd\b|\bplc\b|\bllp\b", "", company_clean)
     company_clean = re.sub(r"[^a-z0-9]", "", company_clean)
@@ -389,41 +397,45 @@ def prepare_display_df(df: pd.DataFrame) -> pd.DataFrame:
         "company_name": "Company Name",
         "sic_codes": "SIC Codes",
     }
-    display_df = display_df.rename(columns=rename_map)
-    return display_df
+    return display_df.rename(columns=rename_map)
 
 
-def run_pipeline(date_from: str, date_to: str):
+def run_pipeline(api_keys: List[str], date_from: str, date_to: str):
     seen_companies = set(load_json_file(SEEN_FILE, []))
     officer_cache = load_json_file(OFFICER_CACHE_FILE, {})
 
-    client = RotatingCHClient(API_KEYS, rotate_every=599)
+    client = RotatingCHClient(api_keys, rotate_every=599)
     rows = collect_companies(client, date_from, date_to, seen_companies, officer_cache)
 
     save_json_file(SEEN_FILE, sorted(seen_companies))
     save_json_file(OFFICER_CACHE_FILE, officer_cache)
     write_results_csv(rows, RESULTS_FILE)
 
-    return rows, seen_companies, officer_cache
+    return rows
 
 
 st.set_page_config(page_title="Companies House Live Monitor", layout="wide")
 st.title("Companies House Live Monitor")
-st.caption("Auto-refreshing dashboard for filtered Companies House results.")
+st.caption("Dashboard for filtered Companies House results.")
+
+api_keys = get_api_keys()
+if not api_keys:
+    st.error(
+        "No API keys found. Add COMPANIES_HOUSE_API_KEYS to Streamlit secrets "
+        "or environment variables as a comma-separated list."
+    )
+    st.stop()
 
 with st.sidebar:
     st.header("Search settings")
     default_date = datetime.today().strftime("%Y-%m-%d")
     date_from = st.text_input("Incorporation start date", value=default_date)
     date_to = st.text_input("Incorporation end date", value=default_date)
-    auto_refresh = st.toggle("Auto-refresh every 5 seconds", value=True)
-    run_now = st.button("Run search now")
+    auto_refresh = st.toggle("Auto-refresh every 2 minutes", value=True)
+    run_now = st.button("Refresh results now")
     clear_data = st.button("Clear saved results")
 
-st.warning(
-    "This dashboard is set to refresh every 5 seconds. "
-    "Frequent refreshes can hit Companies House API rate limits quickly."
-)
+st.info("Auto-refresh is set to 2 minutes. Use 'Refresh results now' to run immediately.")
 
 if clear_data:
     for path in [RESULTS_FILE, SEEN_FILE, OFFICER_CACHE_FILE]:
@@ -444,13 +456,11 @@ if auto_refresh:
 else:
     refresh_count = 0
 
-should_run = run_now or auto_refresh
 new_rows = []
-
-if should_run:
+if run_now or auto_refresh:
     try:
         with st.spinner("Checking Companies House for new matches..."):
-            new_rows, seen_companies, officer_cache = run_pipeline(date_from, date_to)
+            new_rows = run_pipeline(api_keys, date_from, date_to)
         st.success(f"Run completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     except Exception as e:
         st.error(f"Error during run: {e}")
