@@ -3,3 +3,7 @@ streamlit-autorefresh
 pandas
 requests
 pip install -r
+streamlit
+streamlit-autorefresh==1.0.1
+pandas
+requests
